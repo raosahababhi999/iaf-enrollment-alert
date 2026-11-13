@@ -31,15 +31,42 @@ INTAKE_PATTERNS = [
 def now():
     return datetime.now(timezone.utc).isoformat()
 
+class AppsScriptRelaySession:
+    """Fetch official IAF resources through a deployed Google Apps Script web app."""
+    def __init__(self):
+        self.endpoint = os.environ.get("APPS_SCRIPT_URL", "").strip()
+        self.token = os.environ.get("APPS_SCRIPT_TOKEN", "").strip()
+        if not self.endpoint or not self.token:
+            raise RuntimeError("Missing APPS_SCRIPT_URL or APPS_SCRIPT_TOKEN GitHub Actions secret.")
+
+    def get(self, url, timeout=TIMEOUT):
+        payload = {"token": self.token, "url": url}
+        relay = requests.post(self.endpoint, json=payload, timeout=120)
+        relay.raise_for_status()
+        try:
+            result = relay.json()
+        except Exception as exc:
+            raise RuntimeError("Apps Script returned a non-JSON response; check Web App deployment access settings.") from exc
+        if not result.get("ok"):
+            status = result.get("status", "unknown")
+            message = result.get("error", "Unknown Apps Script relay error")
+            raise RuntimeError(f"Apps Script relay failed (HTTP {status}): {message}")
+        try:
+            content = __import__("base64").b64decode(result.get("bodyBase64", ""), validate=True)
+        except Exception as exc:
+            raise RuntimeError("Apps Script response contained invalid Base64 content.") from exc
+        response = requests.Response()
+        response.status_code = int(result.get("status", 200))
+        response.headers.update(result.get("headers", {}))
+        response._content = content
+        response.url = result.get("finalUrl") or url
+        response.encoding = requests.utils.get_encoding_from_headers(response.headers)
+        response.raise_for_status()
+        return response
+
+
 def http_session():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-    })
-    return session
+    return AppsScriptRelaySession()
 
 def recipients():
     raw = os.environ.get("ALERT_EMAILS", "")
@@ -204,7 +231,7 @@ def build_report(events, page_changes, warning_errors=None):
         "Official IAF pages:",
         *PAGES,
         "",
-        "This alert is generated automatically by the GitHub-hosted IAF Enrolment Alert monitor.",
+        "This alert is generated automatically by GitHub Actions using a Google Apps Script fetch relay.",
     ])
     return "\n".join(lines)
 
@@ -326,7 +353,7 @@ if __name__ == "__main__":
             if signature != previous_signature:
                 send_email(
                     "IAF Enrolment Alert | Monitor error",
-                    "The GitHub-hosted IAF monitor encountered an error.\n\n"
+                    "The GitHub Actions IAF monitor (Google Apps Script relay) encountered an error.\n\n"
                     + error_text
                     + "\n\nCheck the GitHub Actions run logs. A website access error is not proof that no update exists.\n"
                     + "\n".join(PAGES),
