@@ -34,8 +34,10 @@ def now():
 def http_session():
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "IAF-Enrolment-Alert-Monitor/2.0 (+GitHub Actions)",
-        "Accept": "text/html,application/pdf,*/*",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/pdf,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
     })
     return session
 
@@ -314,14 +316,26 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         print("MONITOR FAILED:", repr(exc), file=sys.stderr)
+        # Deduplicate identical fatal errors: never send the same 403 email
+        # every 10 minutes. A changed error will trigger a new alert.
         try:
-            send_email(
-                "IAF Enrolment Alert | Monitor error",
-                "The GitHub-hosted IAF monitor encountered an error.\n\n"
-                + repr(exc)
-                + "\n\nCheck the GitHub Actions run logs. A website access error is not proof that no update exists.\n"
-                + "\n".join(PAGES),
-            )
+            failure_state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+            error_text = repr(exc)
+            signature = hashlib.sha256(error_text.encode("utf-8")).hexdigest()
+            previous_signature = failure_state.get("fatal_error_signature")
+            if signature != previous_signature:
+                send_email(
+                    "IAF Enrolment Alert | Monitor error",
+                    "The GitHub-hosted IAF monitor encountered an error.\n\n"
+                    + error_text
+                    + "\n\nCheck the GitHub Actions run logs. A website access error is not proof that no update exists.\n"
+                    + "\n".join(PAGES),
+                )
+                failure_state["fatal_error_signature"] = signature
+                failure_state["fatal_error_last_sent_at"] = now()
+                STATE.write_text(json.dumps(failure_state, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8")
+            else:
+                print("Same fatal error already emailed; suppressing duplicate notification.")
         except Exception as mail_exc:
-            print("Could not send failure email:", repr(mail_exc), file=sys.stderr)
+            print("Could not send/deduplicate failure email:", repr(mail_exc), file=sys.stderr)
         raise
