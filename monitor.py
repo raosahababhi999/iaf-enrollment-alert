@@ -1,91 +1,327 @@
-import os, json, hashlib, html, re, sys
+import os
+import re
+import json
+import hashlib
+import html
+import io
+import sys
+import smtplib
 from pathlib import Path
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlparse
+from email.message import EmailMessage
+from urllib.parse import urljoin, urlparse, urldefrag
+
 import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
-import io
 
-PAGES = ['https://iafrecruitment.edcil.co.in/airmen/', 'https://iafrecruitment.edcil.co.in/airmen/psl.html']
-STATE = Path('state.json')
-TERMS = ('psl','provisional selection','selection list','enrolment','enrollment','intake','2027','0127')
-PATTERNS = [re.compile(r'\bintake\s*0?1\s*[/\-]\s*2027\b', re.I), re.compile(r'\b01\s*[/\-]\s*2027\b', re.I)]
+PAGES = [
+    "https://iafrecruitment.edcil.co.in/airmen/",
+    "https://iafrecruitment.edcil.co.in/airmen/psl.html",
+]
+STATE = Path("state.json")
 TIMEOUT = (15, 45)
+MAX_PDF_BYTES = 35 * 1024 * 1024
+MAX_LINKS_PER_PAGE = 500
+INTAKE_PATTERNS = [
+    re.compile(r"\bintake\s*0?1\s*[/\-]\s*2027\b", re.I),
+    re.compile(r"\b01\s*[/\-]\s*2027\b", re.I),
+]
 
-def http():
-    s = requests.Session()
-    s.headers.update({'User-Agent':'IAF-Enrolment-Alert-Monitor/1.0','Accept':'text/html,application/pdf,*/*'})
-    return s
+def now():
+    return datetime.now(timezone.utc).isoformat()
 
-def telegram(s, message):
-    token = os.environ.get('TELEGRAM_BOT_TOKEN','').strip()
-    chat = os.environ.get('TELEGRAM_CHAT_ID','').strip()
-    if not token or not chat: raise RuntimeError('Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in GitHub Actions Secrets')
-    r = s.post('https://api.telegram.org/bot'+token+'/sendMessage', json={'chat_id':chat,'text':message,'parse_mode':'HTML','disable_web_page_preview':True}, timeout=TIMEOUT)
-    r.raise_for_status()
-    if not r.json().get('ok'): raise RuntimeError('Telegram API rejected sendMessage')
+def http_session():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "IAF-Enrolment-Alert-Monitor/2.0 (+GitHub Actions)",
+        "Accept": "text/html,application/pdf,*/*",
+    })
+    return session
 
-def discover(s):
-    links, errors, success = {}, [], 0
-    for page in PAGES:
+def recipients():
+    raw = os.environ.get("ALERT_EMAILS", "")
+    values = re.split(r"[,;\s]+", raw.strip())
+    result = list(dict.fromkeys(x.strip() for x in values if x.strip()))
+    if not result:
+        raise RuntimeError("ALERT_EMAILS is empty. Add one or more recipient email addresses.")
+    return result
+
+def send_email(subject, body):
+    sender = os.environ.get("GMAIL_ADDRESS", "").strip()
+    password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "").strip()
+    targets = recipients()
+    if not sender or not password:
+        raise RuntimeError("Missing GMAIL_ADDRESS or GMAIL_APP_PASSWORD GitHub Actions secret.")
+
+    sent, failed = [], []
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
+        smtp.login(sender, password)
+        for target in targets:
+            message = EmailMessage()
+            message["From"] = sender
+            message["To"] = target
+            message["Subject"] = subject
+            message.set_content(body)
+            try:
+                smtp.send_message(message, to_addrs=[target])
+                sent.append(target)
+                print("Email sent:", target)
+            except Exception as exc:
+                failed.append((target, str(exc)))
+                print("Email failed for", target, ":", repr(exc))
+
+    print("Email delivery:", len(sent), "sent;", len(failed), "failed;", "recipients:", len(targets))
+    if not sent:
+        raise RuntimeError("Email delivery failed for every recipient: " + "; ".join(f"{a}: {b}" for a, b in failed))
+    return sent, failed
+
+def is_pdf_url(url):
+    return urlparse(url).path.lower().endswith(".pdf")
+
+def inspect_pdf(session, url):
+    response = session.get(url, timeout=TIMEOUT)
+    response.raise_for_status()
+    data = response.content
+    if len(data) > MAX_PDF_BYTES:
+        raise RuntimeError("PDF exceeds 35 MB safety limit")
+    if not data.startswith(b"%PDF") and "pdf" not in response.headers.get("Content-Type", "").lower():
+        raise RuntimeError("Link did not return a PDF")
+    extracted = ""
+    try:
+        reader = PdfReader(io.BytesIO(data), strict=False)
+        extracted = "\n".join((page.extract_text() or "") for page in reader.pages[:30])
+    except Exception as exc:
+        print("PDF text extraction unavailable:", url, repr(exc))
+    haystack = (url + " " + extracted).lower()
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "bytes": len(data),
+        "intake_01_2027": any(pattern.search(haystack) for pattern in INTAKE_PATTERNS),
+        "text_extractable": bool(extracted.strip()),
+    }
+
+def discover(session):
+    pages, links, errors = {}, {}, []
+    successful_pages = 0
+
+    for page_url in PAGES:
         try:
-            r=s.get(page,timeout=TIMEOUT); r.raise_for_status()
-            if 'html' not in r.headers.get('Content-Type','').lower() and not r.text.lstrip().startswith('<'): raise RuntimeError('Response is not HTML')
-            success += 1
-            soup=BeautifulSoup(r.text,'html.parser')
-            for a in soup.find_all('a',href=True):
-                url=urljoin(r.url,a['href'].strip()); label=' '.join(a.get_text(' ',strip=True).split()) or 'Official PDF'
-                if urlparse(url).path.lower().endswith('.pdf') and any(t in (label+' '+url).lower() for t in TERMS):
-                    links[url]={'url':url,'label':label,'source_page':page}
-        except Exception as e: errors.append(page+': '+str(e))
-    if not success: raise RuntimeError('All official pages failed: '+' | '.join(errors))
-    return links,errors
+            response = session.get(page_url, timeout=TIMEOUT)
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "html" not in content_type and not response.text.lstrip().startswith("<"):
+                raise RuntimeError("Response was not HTML")
 
-def inspect(s,item):
-    r=s.get(item['url'],timeout=TIMEOUT); r.raise_for_status(); data=r.content
-    if len(data)>35*1024*1024: raise RuntimeError('PDF larger than 35 MB')
-    if not data.startswith(b'%PDF') and 'pdf' not in r.headers.get('Content-Type','').lower(): raise RuntimeError('URL did not return a PDF')
-    text=''
-    try: text='\n'.join((p.extract_text() or '') for p in PdfReader(io.BytesIO(data),strict=False).pages[:30])
-    except Exception: pass
-    hay=(item['label']+' '+item['url']+' '+text).lower()
-    return {**item,'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),'intake_match':any(p.search(hay) for p in PATTERNS),'text_extractable':bool(text.strip()),'checked_at':datetime.now(timezone.utc).isoformat()}
+            successful_pages += 1
+            soup = BeautifulSoup(response.text, "html.parser")
+            for unwanted in soup(["script", "style", "noscript"]):
+                unwanted.decompose()
 
-def send_doc(s,doc,status):
-    label=html.escape(doc['label']); url=html.escape(doc['url'],quote=True); source=html.escape(doc['source_page'],quote=True)
-    match='Intake 01/2027 text matched' if doc['intake_match'] else 'Intake 01/2027 not confirmed in extracted text'
-    telegram(s,'🚨 <b>IAF INTAKE 01/2027 ALERT</b>\n\n<b>'+status+'</b>\nDocument: '+label+'\n'+match+'\nSize: '+str(doc['bytes'])+' bytes\n\n<a href="'+url+'">Open official PDF</a>\n<a href="'+source+'">Source page</a>')
+            page_title = " ".join(soup.title.get_text(" ", strip=True).split()) if soup.title else page_url
+            text_lines = [
+                " ".join(line.split())
+                for line in soup.get_text("\n").splitlines()
+                if line.strip()
+            ]
+            text_lines = list(dict.fromkeys(text_lines))[:1500]
+            text_hash = hashlib.sha256("\n".join(text_lines).encode("utf-8")).hexdigest()
+            pages[page_url] = {
+                "title": page_title,
+                "sha256": text_hash,
+                "lines": text_lines,
+                "checked_at": now(),
+            }
+
+            count = 0
+            for anchor in soup.find_all("a", href=True):
+                href = anchor.get("href", "").strip()
+                absolute = urljoin(response.url, href)
+                absolute, _fragment = urldefrag(absolute)
+                parsed = urlparse(absolute)
+                if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    continue
+                label = " ".join(anchor.get_text(" ", strip=True).split()) or parsed.path.rsplit("/", 1)[-1] or "Linked page"
+                links[absolute] = {
+                    "url": absolute,
+                    "label": label[:250],
+                    "source_page": page_url,
+                    "kind": "PDF" if is_pdf_url(absolute) else "Link",
+                }
+                count += 1
+                if count >= MAX_LINKS_PER_PAGE:
+                    break
+        except Exception as exc:
+            errors.append(f"{page_url}: {exc}")
+
+    if successful_pages == 0:
+        raise RuntimeError("All official pages failed. " + " | ".join(errors))
+    return pages, links, errors
+
+def build_report(events, page_changes, warning_errors=None):
+    lines = [
+        "IAF ENROLMENT ALERT",
+        "Intake focus: 01/2027",
+        "Checked at (UTC): " + now(),
+        "",
+    ]
+    if events:
+        lines.append("NEW OR CHANGED WEBSITE ITEMS")
+        lines.append("=" * 32)
+        for index, event in enumerate(events, 1):
+            lines.extend([
+                f"{index}. {event['status']}: {event['label']}",
+                "Type: " + event["kind"],
+                "URL: " + event["url"],
+                "Found on: " + event["source_page"],
+            ])
+            if event.get("bytes") is not None:
+                lines.append("PDF size: " + str(event["bytes"]) + " bytes")
+                lines.append("Intake 01/2027 text: " + ("MATCHED" if event.get("intake_01_2027") else "not confirmed"))
+                if not event.get("text_extractable"):
+                    lines.append("Note: PDF text could not be extracted; open the PDF to verify.")
+            lines.append("")
+    if page_changes:
+        lines.extend(["WEBSITE PAGE TEXT CHANGES", "=" * 32])
+        for change in page_changes:
+            lines.append("Page: " + change["url"])
+            for added in change["added_lines"][:12]:
+                lines.append("+ " + added[:300])
+            if not change["added_lines"]:
+                lines.append("The page text fingerprint changed (layout or content may have changed).")
+            lines.append("")
+    if warning_errors:
+        lines.extend(["CHECK WARNINGS", "=" * 32])
+        lines.extend("- " + error[:700] for error in warning_errors[:10])
+        lines.append("A failed page/PDF check is not proof that no recruitment update exists.")
+    lines.extend([
+        "",
+        "Official IAF pages:",
+        *PAGES,
+        "",
+        "This alert is generated automatically by the GitHub-hosted IAF Enrolment Alert monitor.",
+    ])
+    return "\n".join(lines)
 
 def main():
-    s=http(); state=json.loads(STATE.read_text()) if STATE.exists() else {'initialized':False,'documents':{}}
-    old=state.get('documents',{}); links,page_errors=discover(s); current={}; pdf_errors=[]
-    for url,item in links.items():
-        try: current[url]=inspect(s,item)
-        except Exception as e: pdf_errors.append(url+': '+str(e))
-    if links and not current: raise RuntimeError('PDF links found but none could be checked: '+' | '.join(pdf_errors))
-    first=not state.get('initialized'); new=[]; changed=[]
-    if not first:
-        for url,doc in current.items():
-            prior=old.get(url)
-            if prior is None: new.append(doc)
-            elif prior.get('sha256')!=doc['sha256']: changed.append(doc)
-    merged=dict(old); merged.update(current)
-    state.update({'initialized':True,'documents':merged,'last_checked_at':datetime.now(timezone.utc).isoformat(),'last_error':' | '.join(page_errors+pdf_errors) or None})
-    STATE.write_text(json.dumps(state,indent=2,ensure_ascii=False)+'\n')
-    if first: telegram(s,'✅ <b>IAF Enrolment Alert monitor is active</b>\nInitial baseline saved: '+str(len(current))+' relevant PDF(s). New or changed PDFs will alert on later checks.')
-    else:
-        for d in new: send_doc(s,d,'NEW PDF DETECTED')
-        for d in changed: send_doc(s,d,'PDF CONTENT CHANGED')
-    if page_errors or pdf_errors:
-        details='\n'.join('• '+html.escape(x[:500]) for x in (page_errors+pdf_errors)[:5])
-        telegram(s,'⚠️ <b>Partial check warning</b>\nSome pages/PDFs could not be checked. This is not proof that no update exists.\n'+details)
-    print('Links:',len(links),'Checked:',len(current),'New:',len(new),'Changed:',len(changed),'Errors:',len(page_errors)+len(pdf_errors))
+    session = http_session()
+    state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+    old_pages = state.get("pages", {})
+    old_links = state.get("links", {})
+    old_pdfs = state.get("pdfs", {})
 
-if __name__=='__main__':
-    try: main()
-    except Exception as e:
-        print('MONITOR FAILED:',repr(e),file=sys.stderr)
-        try: telegram(http(),'❌ <b>IAF monitor failed</b>\n'+html.escape(str(e))[:2000])
-        except Exception as te: print('Telegram failure alert failed:',repr(te),file=sys.stderr)
+    pages, links, page_errors = discover(session)
+    current_pdfs, pdf_errors = {}, []
+
+    # Download every linked PDF so a replacement file at the same URL is detected too.
+    for url, item in links.items():
+        if not is_pdf_url(url):
+            continue
+        try:
+            current_pdfs[url] = inspect_pdf(session, url)
+        except Exception as exc:
+            pdf_errors.append(f"{url}: {exc}")
+
+    # Older Telegram state has documents/initialized but no pages/links. Treat this
+    # first Gmail run as a clean baseline to avoid emailing every pre-existing link.
+    baseline = not state.get("pages") and not state.get("links")
+    events, page_changes = [], []
+
+    if not baseline:
+        for url, item in links.items():
+            previous = old_links.get(url)
+            pdf_info = current_pdfs.get(url, {})
+            if previous is None:
+                events.append({
+                    **item,
+                    "status": "NEW LINK FOUND",
+                    **pdf_info,
+                })
+            elif is_pdf_url(url):
+                old_pdf = old_pdfs.get(url, {})
+                new_pdf = current_pdfs.get(url, {})
+                if old_pdf.get("sha256") and new_pdf.get("sha256") and old_pdf["sha256"] != new_pdf["sha256"]:
+                    events.append({
+                        **item,
+                        "status": "PDF FILE CONTENT CHANGED",
+                        **new_pdf,
+                    })
+
+        for page_url, current in pages.items():
+            previous = old_pages.get(page_url, {})
+            if previous.get("sha256") and previous["sha256"] != current["sha256"]:
+                old_lines = set(previous.get("lines", []))
+                added = [line for line in current["lines"] if line not in old_lines]
+                page_changes.append({"url": page_url, "added_lines": added})
+
+    warning_errors = page_errors + pdf_errors
+    previous_warning = state.get("warning_signature")
+    warning_signature = hashlib.sha256("\n".join(warning_errors).encode("utf-8")).hexdigest() if warning_errors else None
+    warning_changed = bool(warning_errors and warning_signature != previous_warning)
+
+    # Persist a complete successful snapshot. Keep old known items if a source page
+    # failed this run, so temporary 403/5xx responses do not erase the baseline.
+    merged_pages = dict(old_pages)
+    merged_pages.update(pages)
+    merged_links = dict(old_links)
+    merged_links.update(links)
+    merged_pdfs = dict(old_pdfs)
+    merged_pdfs.update(current_pdfs)
+
+    state.update({
+        "initialized": True,
+        "pages": merged_pages,
+        "links": merged_links,
+        "pdfs": merged_pdfs,
+        "last_checked_at": now(),
+        "last_warning": warning_errors or None,
+        "warning_signature": warning_signature,
+    })
+    STATE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    if baseline:
+        subject = "IAF Enrolment Alert | Email monitor activated"
+        body = (
+            "Your IAF Enrolment Alert email monitor has completed its first baseline scan.\n\n"
+            f"Official pages checked successfully: {len(pages)}\n"
+            f"Existing links recorded: {len(links)}\n"
+            f"Linked PDFs checked: {len(current_pdfs)}\n\n"
+            "This first run records existing website items and does not label them as new. "
+            "Future newly published links, new PDFs, changed PDF files and detected page-text changes will trigger email alerts.\n\n"
+            + (build_report([], [], warning_errors) if warning_errors else "No check warnings were reported in this scan.")
+        )
+        send_email(subject, body)
+    elif events or page_changes or warning_changed:
+        subject = f"IAF Enrolment Alert | {len(events)} new/changed link(s), {len(page_changes)} page change(s)"
+        body = build_report(events, page_changes, warning_errors if warning_changed else None)
+        send_email(subject, body)
+
+    print(
+        "Pages:", len(pages),
+        "Links:", len(links),
+        "PDFs checked:", len(current_pdfs),
+        "New/changed links:", len(events),
+        "Page text changes:", len(page_changes),
+        "Warnings:", len(warning_errors),
+        "Baseline:", baseline,
+    )
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print("MONITOR FAILED:", repr(exc), file=sys.stderr)
+        try:
+            send_email(
+                "IAF Enrolment Alert | Monitor error",
+                "The GitHub-hosted IAF monitor encountered an error.\n\n"
+                + repr(exc)
+                + "\n\nCheck the GitHub Actions run logs. A website access error is not proof that no update exists.\n"
+                + "\n".join(PAGES),
+            )
+        except Exception as mail_exc:
+            print("Could not send failure email:", repr(mail_exc), file=sys.stderr)
         raise
