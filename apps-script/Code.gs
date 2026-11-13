@@ -17,13 +17,8 @@ function doPost(e) {
       return jsonOutput({ok: false, status: 401, error: "Unauthorized. Check the configured relay token."});
     }
     const target = String(input.url || "");
-    let parsed;
-    try {
-      parsed = new URL(target);
-    } catch (err) {
-      return jsonOutput({ok: false, status: 400, error: "Invalid URL."});
-    }
-    if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== ALLOWED_HOST) {
+    const match = target.match(/^https:\/\/([^\/?#]+)(?:[\/?#]|$)/i);
+    if (!match || match[1].toLowerCase() !== ALLOWED_HOST) {
       return jsonOutput({ok: false, status: 403, error: "Only HTTPS URLs on the official IAF recruitment host are allowed."});
     }
     const response = UrlFetchApp.fetch(target, {
