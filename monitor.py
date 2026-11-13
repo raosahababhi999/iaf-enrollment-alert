@@ -21,7 +21,7 @@ PAGES = [
 ]
 STATE = Path("state.json")
 TIMEOUT = (15, 45)
-MAX_PDF_BYTES = 35 * 1024 * 1024
+MAX_PDF_BYTES = 5 * 1024 * 1024
 MAX_LINKS_PER_PAGE = 500
 INTAKE_PATTERNS = [
     re.compile(r"\bintake\s*0?1\s*[/\-]\s*2027\b", re.I),
@@ -248,6 +248,9 @@ def main():
     # Download every linked PDF so a replacement file at the same URL is detected too.
     for url, item in links.items():
         if not is_pdf_url(url):
+            continue
+        if urlparse(url).hostname != "iafrecruitment.edcil.co.in":
+            pdf_errors.append(f"{url}: external PDF host is listed but not fetched by the restricted Apps Script relay")
             continue
         try:
             current_pdfs[url] = inspect_pdf(session, url)
