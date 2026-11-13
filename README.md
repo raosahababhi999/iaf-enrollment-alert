@@ -1,6 +1,6 @@
 # IAF Enrolment Alert
 
-GitHub Actions-based monitor for official Indian Air Force Airmen recruitment pages, focused on Intake 01/2027. Notifications are sent by Gmail SMTP only.
+GitHub Actions-based monitor for official Indian Air Force Airmen recruitment pages, focused on Intake 01/2027. Google Apps Script fetches the official IAF pages/PDFs on behalf of the workflow; GitHub Actions compares changes and sends Gmail SMTP alerts.
 
 ## What it monitors
 - Official Airmen landing page and PSL page.
@@ -32,7 +32,7 @@ Gmail SMTP uses \`smtp.gmail.com:587\` with STARTTLS. The sender Gmail account m
 - PDF hashing downloads linked PDFs on each check. Files over 35 MB are skipped and reported.
 - Text extraction uses pypdf. Scanned/image-only PDFs may not yield searchable text; the alert still includes the PDF name and direct link.
 - If the official site returns HTTP 403/5xx or blocks GitHub-hosted runners, the workflow sends an error/warning email when SMTP is available. A successful website check is required before declaring the scan complete.
-- This project uses GitHub Actions and Gmail SMTP. It does not use Supabase, Firebase, Telegram, ntfy, WhatsApp, or Resend.
+- This project uses GitHub Actions, Google Apps Script as an HTTP fetch relay, and Gmail SMTP. It does not use Supabase, Firebase, Telegram, ntfy, WhatsApp, or Resend.
 
 ## Files
 - \`monitor.py\`: page/link discovery, PDF hashing, change detection, Gmail notifications.
