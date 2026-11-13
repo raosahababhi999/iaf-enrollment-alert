@@ -31,10 +31,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run IAF monitor through Google Apps Script relay
+      - name: Run IAF website monitor and Gmail alerts
         env:
-          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
-          APPS_SCRIPT_TOKEN: ${{ secrets.APPS_SCRIPT_TOKEN }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAILS: ${{ secrets.ALERT_EMAILS }}
