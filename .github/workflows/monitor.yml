@@ -33,9 +33,9 @@ jobs:
 
       - name: Run IAF website monitor and Gmail alerts
         env:
-          GMAIL_ADDRESS: \${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: \${{ secrets.GMAIL_APP_PASSWORD }}
-          ALERT_EMAILS: \${{ secrets.ALERT_EMAILS }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAILS: ${{ secrets.ALERT_EMAILS }}
         run: python monitor.py
 
       - name: Save monitoring history
