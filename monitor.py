@@ -452,7 +452,7 @@ if __name__ == "__main__":
                 )
                 failure_state["fatal_error_signature"] = signature
                 failure_state["fatal_error_last_sent_at"] = now()
-                STATE.write_text(json.dumps(failure_state, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8")
+                STATE.write_text(json.dumps(failure_state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             else:
                 print("Same fatal error already emailed; suppressing duplicate notification.")
         except Exception as mail_exc:
