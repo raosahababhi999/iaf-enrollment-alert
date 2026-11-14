@@ -163,7 +163,97 @@ def discover(session):
         raise RuntimeError("All official pages failed. " + " | ".join(errors))
     return pages, links, errors
 
-def build_report(events, page_changes, warning_errors=None):
+
+API_ENDPOINTS = {
+    "News ticker (getNewsJson)": "https://iafrecruitment.edcil.co.in/airmen/getNewsJson",
+    "News panel (getJson)": "https://iafrecruitment.edcil.co.in/airmen/getJson",
+}
+
+def fetch_api_snapshots(session):
+    """Call the public endpoints as the site's own JavaScript does; never treat HTML as JSON."""
+    snapshots, api_links, warnings = {}, {}, []
+    headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://iafrecruitment.edcil.co.in/airmen/",
+    }
+    for label, url in API_ENDPOINTS.items():
+        try:
+            response = session.get(url, headers=headers, timeout=TIMEOUT)
+            body = response.content
+            content_type = response.headers.get("Content-Type", "").lower()
+            raw_hash = hashlib.sha256(body).hexdigest()
+            snapshot = {
+                "label": label,
+                "url": url,
+                "status": response.status_code,
+                "content_type": content_type,
+                "bytes": len(body),
+                "raw_sha256": raw_hash,
+                "checked_at": now(),
+                "is_json": False,
+                "record_count": 0,
+            }
+            response.raise_for_status()
+
+            parsed = None
+            try:
+                parsed = response.json()
+            except (ValueError, json.JSONDecodeError):
+                parsed = None
+
+            if parsed is not None and isinstance(parsed, (list, dict)):
+                normalized = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                snapshot["data_sha256"] = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                snapshot["is_json"] = True
+                records = parsed if isinstance(parsed, list) else [parsed]
+                snapshot["record_count"] = len(records)
+                snapshot["preview"] = normalized[:1200]
+
+                # The site's JavaScript reads Data, url, startDate, endDate and navin.
+                for record in records:
+                    if not isinstance(record, dict):
+                        continue
+                    item_url = record.get("url")
+                    if isinstance(item_url, str) and item_url.strip():
+                        absolute = urljoin(url, item_url.strip())
+                        absolute, _fragment = urldefrag(absolute)
+                        parsed_url = urlparse(absolute)
+                        if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
+                            label_text = html.unescape(str(record.get("Data") or "")).strip()
+                            api_links[absolute] = {
+                                "url": absolute,
+                                "label": re.sub(r"\s+", " ", BeautifulSoup(label_text, "html.parser").get_text(" ", strip=True))[:250]
+                                         or parsed_url.path.rsplit("/", 1)[-1]
+                                         or "API linked item",
+                                "source_page": url,
+                                "kind": "PDF" if is_pdf_url(absolute) else "API link",
+                            }
+            else:
+                # Save diagnostics, but do not call an HTML fallback page a valid API payload.
+                preview = response.text[:300].replace("\r", " ").replace("\n", " ")
+                snapshot["preview"] = preview
+                warnings.append(
+                    f"{label}: expected JSON but received {content_type or 'unknown Content-Type'} "
+                    f"(HTTP {response.status_code}, {len(body)} bytes)"
+                )
+            snapshots[url] = snapshot
+            print(
+                "API check:", label,
+                "status=", snapshot["status"],
+                "content_type=", content_type,
+                "json=", snapshot["is_json"],
+                "records=", snapshot["record_count"],
+            )
+        except Exception as exc:
+            warnings.append(f"{label} ({url}): {exc}")
+            snapshots[url] = {
+                "label": label, "url": url, "error": str(exc), "checked_at": now()
+            }
+            print("API request failed:", label, repr(exc))
+    return snapshots, api_links, warnings
+
+def build_report(events, page_changes, warning_errors=None, api_changes=None):
     lines = [
         "IAF ENROLMENT ALERT",
         "Intake focus: 01/2027",
@@ -195,6 +285,18 @@ def build_report(events, page_changes, warning_errors=None):
             if not change["added_lines"]:
                 lines.append("The page text fingerprint changed (layout or content may have changed).")
             lines.append("")
+    if api_changes:
+        lines.extend(["PUBLIC API DATA CHANGES", "=" * 32])
+        for change in api_changes:
+            lines.extend([
+                "Endpoint: " + change["label"],
+                "URL: " + change["url"],
+                "Response: " + str(change.get("content_type", "unknown")),
+                "JSON records: " + str(change.get("record_count", 0)),
+                "Data SHA-256: " + str(change.get("data_sha256", change.get("raw_sha256", "unavailable"))),
+                "Preview: " + str(change.get("preview", ""))[:900],
+                "",
+            ])
     if warning_errors:
         lines.extend(["CHECK WARNINGS", "=" * 32])
         lines.extend("- " + error[:700] for error in warning_errors[:10])
@@ -214,8 +316,11 @@ def main():
     old_pages = state.get("pages", {})
     old_links = state.get("links", {})
     old_pdfs = state.get("pdfs", {})
+    old_apis = state.get("apis", {})
 
     pages, links, page_errors = discover(session)
+    api_snapshots, api_links, api_errors = fetch_api_snapshots(session)
+    links.update(api_links)
     current_pdfs, pdf_errors = {}, []
 
     # Download every linked PDF so a replacement file at the same URL is detected too.
@@ -230,7 +335,7 @@ def main():
     # Older Telegram state has documents/initialized but no pages/links. Treat this
     # first Gmail run as a clean baseline to avoid emailing every pre-existing link.
     baseline = not state.get("pages") and not state.get("links")
-    events, page_changes = [], []
+    events, page_changes, api_changes = [], [], []
 
     if not baseline:
         for url, item in links.items():
@@ -252,6 +357,16 @@ def main():
                         **new_pdf,
                     })
 
+        for api_url, current_api in api_snapshots.items():
+            previous_api = old_apis.get(api_url, {})
+            # Only compare valid JSON payloads as meaningful API data. HTML/error bodies
+            # are diagnostic warnings, not recruitment updates.
+            if current_api.get("is_json"):
+                old_hash = previous_api.get("data_sha256")
+                new_hash = current_api.get("data_sha256")
+                if old_hash and new_hash and old_hash != new_hash:
+                    api_changes.append(current_api)
+
         for page_url, current in pages.items():
             previous = old_pages.get(page_url, {})
             if previous.get("sha256") and previous["sha256"] != current["sha256"]:
@@ -259,7 +374,7 @@ def main():
                 added = [line for line in current["lines"] if line not in old_lines]
                 page_changes.append({"url": page_url, "added_lines": added})
 
-    warning_errors = page_errors + pdf_errors
+    warning_errors = page_errors + api_errors + pdf_errors
     previous_warning = state.get("warning_signature")
     warning_signature = hashlib.sha256("\n".join(warning_errors).encode("utf-8")).hexdigest() if warning_errors else None
     warning_changed = bool(warning_errors and warning_signature != previous_warning)
@@ -278,6 +393,7 @@ def main():
         "pages": merged_pages,
         "links": merged_links,
         "pdfs": merged_pdfs,
+        "apis": {**old_apis, **api_snapshots},
         "last_checked_at": now(),
         "last_warning": warning_errors or None,
         "warning_signature": warning_signature,
@@ -296,15 +412,18 @@ def main():
             + (build_report([], [], warning_errors) if warning_errors else "No check warnings were reported in this scan.")
         )
         send_email(subject, body)
-    elif events or page_changes or warning_changed:
-        subject = f"IAF Enrolment Alert | {len(events)} new/changed link(s), {len(page_changes)} page change(s)"
-        body = build_report(events, page_changes, warning_errors if warning_changed else None)
+    elif events or page_changes or api_changes or warning_changed:
+        subject = f"IAF Enrolment Alert | {len(events)} link(s), {len(page_changes)} page change(s), {len(api_changes)} API change(s)"
+        body = build_report(events, page_changes, warning_errors if warning_changed else None, api_changes)
         send_email(subject, body)
 
     print(
         "Pages:", len(pages),
         "Links:", len(links),
         "PDFs checked:", len(current_pdfs),
+        "API endpoints checked:", len(api_snapshots),
+        "Valid JSON APIs:", sum(1 for item in api_snapshots.values() if item.get("is_json")),
+        "API data changes:", len(api_changes),
         "New/changed links:", len(events),
         "Page text changes:", len(page_changes),
         "Warnings:", len(warning_errors),
