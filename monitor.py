@@ -364,7 +364,10 @@ def main():
             if current_api.get("is_json"):
                 old_hash = previous_api.get("data_sha256")
                 new_hash = current_api.get("data_sha256")
-                if old_hash and new_hash and old_hash != new_hash:
+                # Alert when an endpoint first starts returning JSON after HTML/errors,
+                # as well as when an established JSON payload changes.
+                became_json = bool(previous_api) and not previous_api.get("is_json")
+                if became_json or (old_hash and new_hash and old_hash != new_hash):
                     api_changes.append(current_api)
 
         for page_url, current in pages.items():
