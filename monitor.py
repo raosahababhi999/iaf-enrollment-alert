@@ -159,8 +159,8 @@ def discover(session):
         except Exception as exc:
             errors.append(f"{page_url}: {exc}")
 
-    if successful_pages == 0:
-        raise RuntimeError("All official pages failed. " + " | ".join(errors))
+    # Do not abort here: the HTML pages may be blocked while the public API
+    # endpoints are still reachable. Let main() test every source independently.
     return pages, links, errors
 
 
