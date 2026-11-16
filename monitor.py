@@ -16,10 +16,45 @@ import requests
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
+# PSL is checked first and remains the primary page for Intake 01/2027.
 PAGES = [
-    "https://iafrecruitment.edcil.co.in/airmen/",
     "https://iafrecruitment.edcil.co.in/airmen/psl.html",
+    "https://iafrecruitment.edcil.co.in/psl.html",
+    "https://iafrecruitment.edcil.co.in/airmen/",
 ]
+
+RECRUITMENT_TERMS = re.compile(
+    r"psl|enrol(?:ment|lment)|selection|merit|result|intake|"
+    r"admit|medical|provisional|final|01[/_-]?2027|2027|candidate|list",
+    re.I,
+)
+ASSET_EXTENSIONS = (
+    ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+    ".ico", ".woff", ".woff2", ".ttf", ".eot", ".mp4", ".webm",
+)
+
+def relevant_link(url, label=""):
+    path = urlparse(url).path.lower()
+    if path.endswith(ASSET_EXTENSIONS):
+        return False
+    return path.endswith(".pdf") or bool(RECRUITMENT_TERMS.search(url + " " + label))
+
+def filtered_source_lines(raw_html):
+    """Keep meaningful page structure/content while excluding visual assets and scripts."""
+    source_soup = BeautifulSoup(raw_html, "html.parser")
+    for tag in source_soup(["script", "style", "noscript", "img", "picture", "source", "svg"]):
+        tag.decompose()
+    for tag in source_soup.find_all("link"):
+        rel = " ".join(tag.get("rel", [])).lower()
+        href = str(tag.get("href", "")).lower()
+        if "stylesheet" in rel or href.endswith(ASSET_EXTENSIONS):
+            tag.decompose()
+    for tag in source_soup.find_all(True):
+        for attr in ("src", "srcset", "poster"):
+            value = tag.get(attr)
+            if isinstance(value, str) and value.lower().split("?")[0].endswith(ASSET_EXTENSIONS):
+                del tag[attr]
+    return source_soup.prettify().splitlines()[:5000]
 STATE = Path("state.json")
 TIMEOUT = (15, 45)
 MAX_PDF_BYTES = 35 * 1024 * 1024
@@ -121,9 +156,9 @@ def discover(session):
 
             successful_pages += 1
             raw_html = response.text
-            raw_html_hash = hashlib.sha256(response.content).hexdigest()
-            raw_html_lines = raw_html.splitlines()[:5000]
-            raw_html_truncated = len(raw_html.splitlines()) > 5000
+            raw_html_lines = filtered_source_lines(raw_html)
+            raw_html_hash = hashlib.sha256("\n".join(raw_html_lines).encode("utf-8")).hexdigest()
+            raw_html_truncated = len(raw_html_lines) >= 5000
             soup = BeautifulSoup(raw_html, "html.parser")
             for unwanted in soup(["script", "style", "noscript"]):
                 unwanted.decompose()
@@ -147,18 +182,13 @@ def discover(session):
             }
 
             count = 0
-            # Inspect common URL-bearing HTML attributes, including non-anchor tags.
-            url_attributes = ("href", "src", "data", "data-href", "data-url",
-                              "data-pdf", "data-file", "formaction", "poster")
+            # Only collect recruitment-related links and PDFs; ignore visual/site assets.
             candidates = []
-            for tag in soup.find_all(True):
-                for attribute in url_attributes:
-                    value = tag.get(attribute)
-                    if isinstance(value, str) and value.strip():
-                        candidates.append((value.strip(), tag.get_text(" ", strip=True)))
-            # Find literal PDF paths embedded in inline JavaScript or HTML source.
+            for anchor in soup.find_all("a", href=True):
+                candidates.append((anchor.get("href", "").strip(), anchor.get_text(" ", strip=True)))
+            # Also catch literal PDF paths embedded in inline HTML/JavaScript source.
             for match in re.findall(r"""[A-Za-z0-9_./%-]+\.pdf(?:\?[^\s"'<>]*)?""", raw_html, flags=re.I):
-                candidates.append((html.unescape(match), "PDF URL found in source code"))
+                candidates.append((html.unescape(match), "PDF URL found in page source"))
             for href, anchor_text in candidates:
                 absolute = urljoin(response.url, href)
                 absolute, _fragment = urldefrag(absolute)
@@ -166,6 +196,8 @@ def discover(session):
                 if parsed.scheme not in ("http", "https") or not parsed.netloc:
                     continue
                 label = " ".join(anchor_text.split()) or parsed.path.rsplit("/", 1)[-1] or "Linked page"
+                if not relevant_link(absolute, label):
+                    continue
                 links[absolute] = {
                     "url": absolute,
                     "label": label[:250],
@@ -240,6 +272,9 @@ def fetch_api_snapshots(session):
                         parsed_url = urlparse(absolute)
                         if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
                             label_text = html.unescape(str(record.get("Data") or "")).strip()
+                            label_text = re.sub(r"\\s+", " ", BeautifulSoup(label_text, "html.parser").get_text(" ", strip=True))[:250]
+                            if not relevant_link(absolute, label_text):
+                                continue
                             api_links[absolute] = {
                                 "url": absolute,
                                 "label": re.sub(r"\s+", " ", BeautifulSoup(label_text, "html.parser").get_text(" ", strip=True))[:250]
@@ -456,9 +491,15 @@ def main():
             + (build_report([], [], warning_errors) if warning_errors else "No check warnings were reported in this scan.")
         )
         send_email(subject, body)
-    elif events or page_changes or api_changes or html_changes or warning_changed:
-        subject = f"IAF Alert | {len(events)} link(s), {len(page_changes)} text change(s), {len(html_changes)} HTML change(s), {len(api_changes)} API change(s)"
-        body = build_report(events, page_changes, warning_errors if warning_changed else None, api_changes, html_changes)
+    elif events or page_changes or api_changes or html_changes:
+        subject = (
+            f"IAF PSL Alert | {len(events)} recruitment item(s), "
+            f"{len(page_changes)} page text change(s), "
+            f"{len(html_changes)} meaningful HTML change(s), "
+            f"{len(api_changes)} API data change(s)"
+        )
+        # Routine API/asset warnings are kept in state/logs, not sent as noisy emails.
+        body = build_report(events, page_changes, None, api_changes, html_changes)
         send_email(subject, body)
 
     print(
