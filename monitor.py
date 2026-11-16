@@ -2,6 +2,7 @@ import os
 import re
 import json
 import hashlib
+import difflib
 import html
 import io
 import sys
@@ -119,7 +120,11 @@ def discover(session):
                 raise RuntimeError("Response was not HTML")
 
             successful_pages += 1
-            soup = BeautifulSoup(response.text, "html.parser")
+            raw_html = response.text
+            raw_html_hash = hashlib.sha256(response.content).hexdigest()
+            raw_html_lines = raw_html.splitlines()[:5000]
+            raw_html_truncated = len(raw_html.splitlines()) > 5000
+            soup = BeautifulSoup(raw_html, "html.parser")
             for unwanted in soup(["script", "style", "noscript"]):
                 unwanted.decompose()
 
@@ -135,18 +140,32 @@ def discover(session):
                 "title": page_title,
                 "sha256": text_hash,
                 "lines": text_lines,
+                "source_sha256": raw_html_hash,
+                "source_lines": raw_html_lines,
+                "source_truncated": raw_html_truncated,
                 "checked_at": now(),
             }
 
             count = 0
-            for anchor in soup.find_all("a", href=True):
-                href = anchor.get("href", "").strip()
+            # Inspect common URL-bearing HTML attributes, including non-anchor tags.
+            url_attributes = ("href", "src", "data", "data-href", "data-url",
+                              "data-pdf", "data-file", "formaction", "poster")
+            candidates = []
+            for tag in soup.find_all(True):
+                for attribute in url_attributes:
+                    value = tag.get(attribute)
+                    if isinstance(value, str) and value.strip():
+                        candidates.append((value.strip(), tag.get_text(" ", strip=True)))
+            # Find literal PDF paths embedded in inline JavaScript or HTML source.
+            for match in re.findall(r"""[A-Za-z0-9_./%-]+\.pdf(?:\?[^\s"'<>]*)?""", raw_html, flags=re.I):
+                candidates.append((html.unescape(match), "PDF URL found in source code"))
+            for href, anchor_text in candidates:
                 absolute = urljoin(response.url, href)
                 absolute, _fragment = urldefrag(absolute)
                 parsed = urlparse(absolute)
                 if parsed.scheme not in ("http", "https") or not parsed.netloc:
                     continue
-                label = " ".join(anchor.get_text(" ", strip=True).split()) or parsed.path.rsplit("/", 1)[-1] or "Linked page"
+                label = " ".join(anchor_text.split()) or parsed.path.rsplit("/", 1)[-1] or "Linked page"
                 links[absolute] = {
                     "url": absolute,
                     "label": label[:250],
@@ -253,7 +272,7 @@ def fetch_api_snapshots(session):
             print("API request failed:", label, repr(exc))
     return snapshots, api_links, warnings
 
-def build_report(events, page_changes, warning_errors=None, api_changes=None):
+def build_report(events, page_changes, warning_errors=None, api_changes=None, html_changes=None):
     lines = [
         "IAF ENROLMENT ALERT",
         "Intake focus: 01/2027",
@@ -284,6 +303,16 @@ def build_report(events, page_changes, warning_errors=None, api_changes=None):
                 lines.append("+ " + added[:300])
             if not change["added_lines"]:
                 lines.append("The page text fingerprint changed (layout or content may have changed).")
+            lines.append("")
+    if html_changes:
+        lines.extend(["RAW HTML SOURCE CODE CHANGES", "=" * 32])
+        for change in html_changes:
+            lines.append("Page: " + change["url"])
+            lines.append("Old SHA-256: " + change["old_sha256"])
+            lines.append("New SHA-256: " + change["new_sha256"])
+            lines.extend(change["diff"][:160])
+            if change.get("truncated"):
+                lines.append("[Diff limited; source snapshot was truncated.]")
             lines.append("")
     if api_changes:
         lines.extend(["PUBLIC API DATA CHANGES", "=" * 32])
@@ -335,7 +364,7 @@ def main():
     # Older Telegram state has documents/initialized but no pages/links. Treat this
     # first Gmail run as a clean baseline to avoid emailing every pre-existing link.
     baseline = not state.get("pages") and not state.get("links")
-    events, page_changes, api_changes = [], [], []
+    events, page_changes, api_changes, html_changes = [], [], [], []
 
     if not baseline:
         for url, item in links.items():
@@ -376,6 +405,18 @@ def main():
                 old_lines = set(previous.get("lines", []))
                 added = [line for line in current["lines"] if line not in old_lines]
                 page_changes.append({"url": page_url, "added_lines": added})
+            old_hash = previous.get("source_sha256")
+            new_hash = current.get("source_sha256")
+            if old_hash and new_hash and old_hash != new_hash:
+                diff = list(difflib.unified_diff(
+                    previous.get("source_lines", []), current.get("source_lines", []),
+                    fromfile="previous.html", tofile="current.html", lineterm=""
+                ))
+                html_changes.append({
+                    "url": page_url, "old_sha256": old_hash, "new_sha256": new_hash,
+                    "diff": diff[:160],
+                    "truncated": bool(previous.get("source_truncated") or current.get("source_truncated") or len(diff) > 160),
+                })
 
     warning_errors = page_errors + api_errors + pdf_errors
     previous_warning = state.get("warning_signature")
@@ -415,9 +456,9 @@ def main():
             + (build_report([], [], warning_errors) if warning_errors else "No check warnings were reported in this scan.")
         )
         send_email(subject, body)
-    elif events or page_changes or api_changes or warning_changed:
-        subject = f"IAF Enrolment Alert | {len(events)} link(s), {len(page_changes)} page change(s), {len(api_changes)} API change(s)"
-        body = build_report(events, page_changes, warning_errors if warning_changed else None, api_changes)
+    elif events or page_changes or api_changes or html_changes or warning_changed:
+        subject = f"IAF Alert | {len(events)} link(s), {len(page_changes)} text change(s), {len(html_changes)} HTML change(s), {len(api_changes)} API change(s)"
+        body = build_report(events, page_changes, warning_errors if warning_changed else None, api_changes, html_changes)
         send_email(subject, body)
 
     print(
