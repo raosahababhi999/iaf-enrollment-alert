@@ -10,21 +10,22 @@
       "label": "News ticker (getNewsJson)",
       "url": "https://iafrecruitment.edcil.co.in/airmen/getNewsJson",
       "error": "403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/airmen/getNewsJson",
-      "checked_at": "2026-11-16T08:01:49.942018+00:00"
+      "checked_at": "2026-11-16T18:23:18.411327+00:00"
     },
     "https://iafrecruitment.edcil.co.in/airmen/getJson": {
       "label": "News panel (getJson)",
       "url": "https://iafrecruitment.edcil.co.in/airmen/getJson",
       "error": "403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/airmen/getJson",
-      "checked_at": "2026-11-16T08:01:50.279563+00:00"
+      "checked_at": "2026-11-16T18:23:18.726944+00:00"
     }
   },
-  "last_checked_at": "2026-11-16T08:01:50.279589+00:00",
+  "last_checked_at": "2026-11-16T18:23:18.726972+00:00",
   "last_warning": [
-    "https://iafrecruitment.edcil.co.in/airmen/: 403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/airmen/",
     "https://iafrecruitment.edcil.co.in/airmen/psl.html: 403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/airmen/psl.html",
+    "https://iafrecruitment.edcil.co.in/psl.html: 403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/psl.html",
+    "https://iafrecruitment.edcil.co.in/airmen/: 403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/airmen/",
     "News ticker (getNewsJson) (https://iafrecruitment.edcil.co.in/airmen/getNewsJson): 403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/airmen/getNewsJson",
     "News panel (getJson) (https://iafrecruitment.edcil.co.in/airmen/getJson): 403 Client Error: Forbidden for url: https://iafrecruitment.edcil.co.in/airmen/getJson"
   ],
-  "warning_signature": "7f6f0b4c2bd55436ab340e3b13c5d3c0dc61bc2083051c648a16d4ecb949ee32"
+  "warning_signature": "9aaf3ae3e3c454a78768be28fb6ac834ef79ddc42bab9bfbdf0d588f19c5246a"
 }
