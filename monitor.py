@@ -178,6 +178,7 @@ def discover(session):
                 "source_sha256": raw_html_hash,
                 "source_lines": raw_html_lines,
                 "source_truncated": raw_html_truncated,
+                "source_filter_version": 2,
                 "checked_at": now(),
             }
 
@@ -272,7 +273,7 @@ def fetch_api_snapshots(session):
                         parsed_url = urlparse(absolute)
                         if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
                             label_text = html.unescape(str(record.get("Data") or "")).strip()
-                            label_text = re.sub(r"\\s+", " ", BeautifulSoup(label_text, "html.parser").get_text(" ", strip=True))[:250]
+                            label_text = re.sub(r"\s+", " ", BeautifulSoup(label_text, "html.parser").get_text(" ", strip=True))[:250]
                             if not relevant_link(absolute, label_text):
                                 continue
                             api_links[absolute] = {
@@ -442,7 +443,7 @@ def main():
                 page_changes.append({"url": page_url, "added_lines": added})
             old_hash = previous.get("source_sha256")
             new_hash = current.get("source_sha256")
-            if old_hash and new_hash and old_hash != new_hash:
+            if previous.get("source_filter_version") == 2 and old_hash and new_hash and old_hash != new_hash:
                 diff = list(difflib.unified_diff(
                     previous.get("source_lines", []), current.get("source_lines", []),
                     fromfile="previous.html", tofile="current.html", lineterm=""
