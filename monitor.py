@@ -147,14 +147,25 @@ def discover(session):
             }
 
             count = 0
-            for anchor in soup.find_all("a", href=True):
-                href = anchor.get("href", "").strip()
+            # Inspect common URL-bearing HTML attributes, including non-anchor tags.
+            url_attributes = ("href", "src", "data", "data-href", "data-url",
+                              "data-pdf", "data-file", "formaction", "poster")
+            candidates = []
+            for tag in soup.find_all(True):
+                for attribute in url_attributes:
+                    value = tag.get(attribute)
+                    if isinstance(value, str) and value.strip():
+                        candidates.append((value.strip(), tag.get_text(" ", strip=True)))
+            # Find literal PDF paths embedded in inline JavaScript or HTML source.
+            for match in re.findall(r"""[A-Za-z0-9_./%-]+\.pdf(?:\?[^\s"'<>]*)?""", raw_html, flags=re.I):
+                candidates.append((html.unescape(match), "PDF URL found in source code"))
+            for href, anchor_text in candidates:
                 absolute = urljoin(response.url, href)
                 absolute, _fragment = urldefrag(absolute)
                 parsed = urlparse(absolute)
                 if parsed.scheme not in ("http", "https") or not parsed.netloc:
                     continue
-                label = " ".join(anchor.get_text(" ", strip=True).split()) or parsed.path.rsplit("/", 1)[-1] or "Linked page"
+                label = " ".join(anchor_text.split()) or parsed.path.rsplit("/", 1)[-1] or "Linked page"
                 links[absolute] = {
                     "url": absolute,
                     "label": label[:250],
