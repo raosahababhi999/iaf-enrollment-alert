@@ -18,13 +18,16 @@ from pypdf import PdfReader
 
 # PSL is checked first and remains the primary page for Intake 01/2027.
 PAGES = [
+    # Airmen / Medical Assistant PSL pages
     "https://iafrecruitment.edcil.co.in/airmen/psl.html",
     "https://iafrecruitment.edcil.co.in/psl.html",
     "https://iafrecruitment.edcil.co.in/airmen/",
+    # Agniveervayu recruitment section on the same official EdCIL portal
+    "https://iafrecruitment.edcil.co.in/agniveervayu/",
 ]
 
 RECRUITMENT_TERMS = re.compile(
-    r"psl|enrol(?:ment|lment)|selection|merit|result|intake|"
+    r"psl|agniveer(?:vayu)?|agnipath|enrol(?:ment|lment)|selection|merit|result|intake|"
     r"admit|medical|provisional|final|01[/_-]?2027|2027|candidate|list",
     re.I,
 )
@@ -432,7 +435,8 @@ def main():
                 # Alert when an endpoint first starts returning JSON after HTML/errors,
                 # as well as when an established JSON payload changes.
                 became_json = bool(previous_api) and not previous_api.get("is_json")
-                if became_json or (old_hash and new_hash and old_hash != new_hash):
+                first_json_observation = not previous_api
+                if became_json or first_json_observation or (old_hash and new_hash and old_hash != new_hash):
                     api_changes.append(current_api)
 
         for page_url, current in pages.items():
