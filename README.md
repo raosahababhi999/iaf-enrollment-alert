@@ -2,12 +2,15 @@
 
 GitHub Actions monitors official Indian Air Force Airmen recruitment pages for Intake 01/2027 and sends Gmail SMTP notifications.
 
-## Official pages
-- https://iafrecruitment.edcil.co.in/airmen/
-- https://iafrecruitment.edcil.co.in/airmen/psl.html
+## Official pages monitored
+- Airmen / Medical Assistant PSL: https://iafrecruitment.edcil.co.in/airmen/psl.html
+- Airmen portal: https://iafrecruitment.edcil.co.in/airmen/
+- Agniveervayu section on the same EdCIL portal: https://iafrecruitment.edcil.co.in/agniveervayu/
+- Additional PSL path checked: https://iafrecruitment.edcil.co.in/psl.html
 
 ## Monitoring
-- New links and PDFs discovered in page anchors.
+- New links and PDFs discovered in page anchors and literal PDF paths in page source.
+- Monitors both Airmen / Medical Assistant and Agniveervayu recruitment sections hosted on the EdCIL portal.
 - PDF byte changes at the same URL (SHA-256).
 - Visible page-text changes and newly added text lines.
 - Partial failures are reported as warnings and are not treated as proof that no recruitment update exists.
